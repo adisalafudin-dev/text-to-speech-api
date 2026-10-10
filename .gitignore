@@ -1,3 +1,24 @@
+# Dependencies
 node_modules/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Build output
 dist/
-tmp
+
+# Temporary files
+tmp/
+nul
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+
