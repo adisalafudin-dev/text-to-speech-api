@@ -1,0 +1,18 @@
+{
+  "name": "tts-api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "REST API Text-to-Speech untuk automasi n8n",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "express": "^5.3.0",
+    "msedge-tts": "^2.0.0"
+  }
+}
