@@ -178,8 +178,23 @@ function toSrtTime(sec) {
 }
 
 // Pecah narasi jadi potongan pendek; waktu dibagi sesuai panjang karakter.
-function buildSrt(narration, duration, wordsPerCue = 5) {
-  const words = narration.replace(/\s+/g, " ").trim().split(" ");
+function toAssTime(sec) {
+  const cs = Math.round(sec * 100);
+  const h = Math.floor(cs / 360000);
+  const m = Math.floor(cs / 6000) % 60;
+  const s = Math.floor(cs / 100) % 60;
+  const c = cs % 100;
+  const p = (v) => String(v).padStart(2, "0");
+  return `${h}:${p(m)}:${p(s)}.${p(c)}`;
+}
+
+function buildAss(narration, duration, wordsPerCue = 5) {
+  const words = narration
+    .replace(/[{}\\]/g, "") // karakter khusus ASS
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ");
+
   const chunks = [];
   for (let i = 0; i < words.length; i += wordsPerCue) {
     chunks.push(words.slice(i, i + wordsPerCue).join(" "));
@@ -188,18 +203,32 @@ function buildSrt(narration, duration, wordsPerCue = 5) {
   const totalChars = chunks.reduce((sum, c) => sum + c.length, 0) || 1;
   let t = 0;
 
-  return chunks
-    .map((chunk, i) => {
-      const start = t;
-      t += (duration * chunk.length) / totalChars;
-      return `${i + 1}\n${toSrtTime(start)} --> ${toSrtTime(t)}\n${chunk}\n`;
-    })
-    .join("\n");
+  const events = chunks.map((chunk) => {
+    const start = t;
+    t += (duration * chunk.length) / totalChars;
+    return `Dialogue: 0,${toAssTime(start)},${toAssTime(t)},Default,,0,0,0,,${chunk}`;
+  });
+
+  return `[Script Info]
+ScriptType: v4.00+
+PlayResX: ${VIDEO_W}
+PlayResY: ${VIDEO_H}
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,${FONT_NAME},64,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,4,0,2,60,60,380,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+${events.join("\n")}
+`;
 }
 
 const FFMPEG = process.env.FFMPEG_PATH || "ffmpeg";
 const FFPROBE = process.env.FFPROBE_PATH || "ffprobe";
-const FONT_FILE = process.env.FONT_FILE || "C:/Windows/Fonts/arial.ttf";
+const FONT_FILE = process.env.FONT_FILE || "C:/Windows/Fonts/arialbd.ttf";
+const FONT_NAME = process.env.FONT_NAME || "Arial";
 
 async function renderScene(dir, scene, burnSubtitles) {
   const duration = await getDuration(scene.audio, dir);
@@ -218,22 +247,22 @@ async function renderScene(dir, scene, burnSubtitles) {
   );
 
   if (withSubtitles) {
-    const srtName = `scene-${scene.n}.srt`;
+    const assName = `scene-${scene.n}.ass`;
     fs.writeFileSync(
-      path.join(dir, srtName),
-      buildSrt(scene.narration, duration),
+      path.join(dir, assName),
+      buildAss(scene.narration, duration),
     );
 
-    // Salin font ke folder job agar libass selalu menemukannya.
+    // Font di subfolder khusus, supaya libass tidak mencoba memuat mp4/mp3.
+    const fontDir = path.join(dir, "fonts");
+    fs.mkdirSync(fontDir, { recursive: true });
     if (fs.existsSync(FONT_FILE)) {
-      fs.copyFileSync(FONT_FILE, path.join(dir, "subtitle-font.ttf"));
+      fs.copyFileSync(FONT_FILE, path.join(fontDir, "subtitle-font.ttf"));
     } else {
       console.warn(`FONT_FILE tidak ditemukan: ${FONT_FILE}`);
     }
 
-    filters.push(
-      `subtitles=${srtName}:fontsdir=.:original_size=${VIDEO_W}x${VIDEO_H}:force_style='FontName=Arial,FontSize=64,Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=4,Shadow=0,Alignment=2,MarginV=380'`,
-    );
+    filters.push(`ass=${assName}:fontsdir=fonts`);
   }
 
   const { stderr } = await execFileAsync(
