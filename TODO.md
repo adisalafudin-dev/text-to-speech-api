@@ -2,6 +2,15 @@
 
 Roadmap pengembangan REST API Text-to-Speech berbasis Express.js, `msedge-tts`, Docker, dan n8n untuk otomatisasi pembuatan konten YouTube.
 
+## install FFMPEG
+
+winget install Gyan.FFmpeg
+
+## Jalankan Service Ini
+
+cd C:\Users\LENOVO\Documents\Project\tts-api
+FFMPEG_PATH='C:\Users\LENOVO\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe' FFPROBE_PATH='C:\Users\LENOVO\AppData\Local\Microsoft\WinGet\Links\ffprobe.exe' npm run start
+
 ## Status saat ini
 
 - [x] Endpoint `POST /api/tts`
@@ -16,6 +25,11 @@ Roadmap pengembangan REST API Text-to-Speech berbasis Express.js, `msedge-tts`, 
 > Tandai item sebagai selesai (`[x]`) setelah implementasi dan pengujiannya benar-benar selesai.
 
 ---
+
+## Feature
+
+- [ ] Tambahkan Link Affiliate
+- [ ] Video Kurang Cocok Perbaiki Lagi
 
 ## P0 — Keamanan dan keandalan dasar
 
