@@ -9,6 +9,10 @@ import multer from "multer";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { preprocessText } from "./src/utils/preprocess.js";
+import { buildPayloads, escapeXml } from "./src/utils/ssml.js";
+import { buildAss } from "./src/utils/captions.js";
+import os from "node:os";
+import { subtitleToAss } from "./src/utils/captions.js";
 
 const execFileAsync = promisify(execFile);
 const app = express();
@@ -49,26 +53,52 @@ function enqueueTts(task) {
   return run;
 }
 
-async function synthesize(requestId, requestDir, voice, text) {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      const tts = new MsEdgeTTS();
-      await tts.setMetadata(
-        voice,
-        OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3,
-      );
-      return await tts.toFile(requestDir, text);
-    } catch (error) {
-      const rateLimited = /\b429\b/.test(error.message);
-      if (!rateLimited || attempt >= TTS_MAX_RETRIES) throw error;
+async function synthesize(requestId, requestDir, voice, payloads) {
+  let lastError;
+  for (let i = 0; i < payloads.length; i++) {
+    const { level, body } = payloads[i];
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const tts = new MsEdgeTTS();
+        await tts.setMetadata(
+          voice,
+          OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3,
+        );
+        const result = await tts.toFile(requestDir, body);
+        if (i > 0) {
+          console.warn(
+            `[${requestId}] berhasil memakai tingkat "${level}" (tingkat sebelumnya ditolak Edge)`,
+          );
+        }
+        return result;
+      } catch (error) {
+        lastError = error;
 
-      const delay = TTS_BACKOFF_MS * 2 ** attempt; // 3s, 6s, 12s
-      console.warn(
-        `[${requestId}] Edge TTS 429, coba lagi dalam ${delay} ms (percobaan ${attempt + 1}/${TTS_MAX_RETRIES})`,
-      );
-      await sleep(delay);
+        // 429: tunggu lalu ulangi tingkat yang SAMA.
+        if (/\b429\b/.test(error.message)) {
+          if (attempt >= TTS_MAX_RETRIES) throw error;
+          const delay = TTS_BACKOFF_MS * 2 ** attempt;
+          console.warn(
+            `[${requestId}] Edge TTS 429, coba lagi dalam ${delay} ms (percobaan ${attempt + 1}/${TTS_MAX_RETRIES})`,
+          );
+          await sleep(delay);
+          continue;
+        }
+
+        // Koneksi ditutup tanpa turn.end: SSML kemungkinan ditolak -> tingkat berikutnya.
+        if (/Stream closed|turn\.end/i.test(error.message)) {
+          console.warn(
+            `[${requestId}] tingkat "${level}" ditolak Edge: ${error.message}`,
+          );
+          await sleep(TTS_MIN_GAP_MS);
+          break;
+        }
+
+        throw error; // error lain tidak di-fallback
+      }
     }
   }
+  throw lastError;
 }
 
 app.post("/api/tts", validateTTSRequest, async (req, res) => {
@@ -87,8 +117,17 @@ app.post("/api/tts", validateTTSRequest, async (req, res) => {
 
     const processedText = preprocessText(text);
 
+    // ssml:false di body = kirim teks polos (escape tetap dilakukan).
+    const payloads =
+      req.body?.ssml === false
+        ? [{ level: "plain", body: escapeXml(processedText) }]
+        : buildPayloads(processedText, {
+            hookRate: req.body?.hookRate,
+            breakMs: req.body?.breakMs,
+          });
+
     const { audioFilePath } = await enqueueTts(() =>
-      synthesize(requestId, requestDir, voice, processedText),
+      synthesize(requestId, requestDir, voice, payloads),
     );
 
     if (!audioFilePath || !fs.existsSync(audioFilePath)) {
@@ -233,42 +272,42 @@ function toAssTime(sec) {
   return `${h}:${p(m)}:${p(s)}.${p(c)}`;
 }
 
-function buildAss(narration, duration, wordsPerCue = 5) {
-  const words = narration
-    .replace(/[{}\\]/g, "") // karakter khusus ASS
-    .replace(/\s+/g, " ")
-    .trim()
-    .split(" ");
+// function buildAss(narration, duration, wordsPerCue = 5) {
+//   const words = narration
+//     .replace(/[{}\\]/g, "") // karakter khusus ASS
+//     .replace(/\s+/g, " ")
+//     .trim()
+//     .split(" ");
 
-  const chunks = [];
-  for (let i = 0; i < words.length; i += wordsPerCue) {
-    chunks.push(words.slice(i, i + wordsPerCue).join(" "));
-  }
+//   const chunks = [];
+//   for (let i = 0; i < words.length; i += wordsPerCue) {
+//     chunks.push(words.slice(i, i + wordsPerCue).join(" "));
+//   }
 
-  const totalChars = chunks.reduce((sum, c) => sum + c.length, 0) || 1;
-  let t = 0;
+//   const totalChars = chunks.reduce((sum, c) => sum + c.length, 0) || 1;
+//   let t = 0;
 
-  const events = chunks.map((chunk) => {
-    const start = t;
-    t += (duration * chunk.length) / totalChars;
-    return `Dialogue: 0,${toAssTime(start)},${toAssTime(t)},Default,,0,0,0,,${chunk}`;
-  });
+//   const events = chunks.map((chunk) => {
+//     const start = t;
+//     t += (duration * chunk.length) / totalChars;
+//     return `Dialogue: 0,${toAssTime(start)},${toAssTime(t)},Default,,0,0,0,,${chunk}`;
+//   });
 
-  return `[Script Info]
-ScriptType: v4.00+
-PlayResX: ${VIDEO_W}
-PlayResY: ${VIDEO_H}
-WrapStyle: 0
+//   return `[Script Info]
+// ScriptType: v4.00+
+// PlayResX: ${VIDEO_W}
+// PlayResY: ${VIDEO_H}
+// WrapStyle: 0
 
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,${FONT_NAME},64,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,4,0,2,60,60,380,1
+// [V4+ Styles]
+// Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+// Style: Default,${FONT_NAME},64,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,4,0,2,60,60,380,1
 
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-${events.join("\n")}
-`;
-}
+// [Events]
+// Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+// ${events.join("\n")}
+// `;
+// }
 
 const FFMPEG = process.env.FFMPEG_PATH || "ffmpeg";
 const FFPROBE = process.env.FFPROBE_PATH || "ffprobe";
@@ -295,9 +334,12 @@ async function renderScene(dir, scene, burnSubtitles) {
     const assName = `scene-${scene.n}.ass`;
     fs.writeFileSync(
       path.join(dir, assName),
-      buildAss(scene.narration, duration),
+      buildAss(scene.narration, duration, {
+        width: VIDEO_W,
+        height: VIDEO_H,
+        fontName: FONT_NAME,
+      }),
     );
-
     // Font di subfolder khusus, supaya libass tidak mencoba memuat mp4/mp3.
     const fontDir = path.join(dir, "fonts");
     fs.mkdirSync(fontDir, { recursive: true });
