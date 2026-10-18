@@ -25,6 +25,52 @@ fs.mkdirSync(TMP_DIR, { recursive: true });
 app.disable("x-powered-by");
 app.use(express.json({ limit: "64kb" }));
 
+// ---------- antrean TTS: berurutan, ada jeda, retry saat 429 ----------
+const TTS_MIN_GAP_MS = Number(process.env.TTS_MIN_GAP_MS) || 1500;
+const TTS_BACKOFF_MS = Number(process.env.TTS_BACKOFF_MS) || 3000;
+const TTS_MAX_RETRIES = 3;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+let ttsQueue = Promise.resolve();
+let lastTtsAt = 0;
+
+function enqueueTts(task) {
+  const run = ttsQueue.then(async () => {
+    const wait = lastTtsAt + TTS_MIN_GAP_MS - Date.now();
+    if (wait > 0) await sleep(wait);
+    try {
+      return await task();
+    } finally {
+      lastTtsAt = Date.now();
+    }
+  });
+  ttsQueue = run.catch(() => {});
+  return run;
+}
+
+async function synthesize(requestId, requestDir, voice, text) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const tts = new MsEdgeTTS();
+      await tts.setMetadata(
+        voice,
+        OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3,
+      );
+      return await tts.toFile(requestDir, text);
+    } catch (error) {
+      const rateLimited = /\b429\b/.test(error.message);
+      if (!rateLimited || attempt >= TTS_MAX_RETRIES) throw error;
+
+      const delay = TTS_BACKOFF_MS * 2 ** attempt; // 3s, 6s, 12s
+      console.warn(
+        `[${requestId}] Edge TTS 429, coba lagi dalam ${delay} ms (percobaan ${attempt + 1}/${TTS_MAX_RETRIES})`,
+      );
+      await sleep(delay);
+    }
+  }
+}
+
 app.post("/api/tts", validateTTSRequest, async (req, res) => {
   const { text, voice } = req.ttsInput;
 
@@ -41,10 +87,9 @@ app.post("/api/tts", validateTTSRequest, async (req, res) => {
 
     const processedText = preprocessText(text);
 
-    const tts = new MsEdgeTTS();
-    await tts.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
-
-    const { audioFilePath } = await tts.toFile(requestDir, processedText);
+    const { audioFilePath } = await enqueueTts(() =>
+      synthesize(requestId, requestDir, voice, processedText),
+    );
 
     if (!audioFilePath || !fs.existsSync(audioFilePath)) {
       throw new Error("File audio tidak berhasil dibuat.");
